@@ -1,0 +1,49 @@
+# settleup 的本地依赖:MySQL(状态权威 + outbox)+ Redis(库存 + tq 队列)。
+# 起服务:   docker compose up -d
+# 看状态:   docker compose ps
+# 连 mysql:  docker compose exec mysql mysql -uroot -proot settleup
+# 连 redis:  docker compose exec redis redis-cli
+# 清库重来:  docker compose down -v && docker compose up -d
+#
+# 注意:你机器上已有手工起的 tq-redis(6379)和 mysql-learn(3306),
+# 端口会撞。用这份 compose 前先把它们停掉,或改下面的宿主机端口。
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: settleup-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: settleup
+    ports:
+      - "3306:3306"
+    volumes:
+      # 首次启动时(数据卷为空)自动执行,把 schema 建好。
+      # 改了 schema.sql 后要 `down -v` 清掉数据卷才会重新加载。
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - settleup-mysql-data:/var/lib/mysql
+    healthcheck:
+      # 只有这条通过,应用才该开始连库。
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: settleup-redis
+    ports:
+      - "6379:6379"
+    # appendonly:让 Redis 里的库存在重启后不丢。这本身就是个可靠性话题——
+    # 库存扣在 Redis、状态落在 MySQL,两个存储的持久化保证不一样。
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - settleup-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  settleup-mysql-data:
+  settleup-redis-data:

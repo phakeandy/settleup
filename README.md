@@ -72,14 +72,56 @@ settleup: a minimal order/stock compensation service.
 ## 3. 功能点
 
 ### 3.1 HTTP API
+先做 sigle-user
 
-| 方法 | 路径 | 功能 |
-|---|---|---|
-| POST | `/v1/orders` | 创建订单 |
-| GET | `/v1/orders/{order_id}` | 查询订单 |
-| POST | `/v1/payments` | 支付确认 |
-| GET | `/health` | 健康检查 |
-| GET | `/metrics` | Prometheus 指标 |
+#### GET /api/products
+
+    [
+        {
+            "id": 1,
+            "name": "",
+            "price": 12300 // 123.00 yuan
+        }
+    ]
+
+#### POST /api/orders 创建订单
+
+    {
+        "product_id": 1,
+        "idempotency_key": "<uuid>",
+        "quantity": 2
+    }
+    // ---
+    {
+        "payment_id": 1,
+        "order_id": 1,
+        "amount": 10000 // 100.00 yuan
+        // other fields
+    }
+
+#### GET /api/orders/{id}
+
+    // ---
+    {
+        "id": 1,
+        "status": 'created' // created, paid, cancelled
+    }
+
+#### POST /api/payments
+
+    {
+        "payment_id": 1,
+    }
+    // ---
+    // 201 created 表示成功 
+    // 4xx 表示失败
+
+#### GET /api/payments/{id}
+
+    {
+        "id": 1,
+        "status": "pending" // pending, succeeded, failed, cancelled
+    }
 
 ### 3.2 创建订单流程
 
