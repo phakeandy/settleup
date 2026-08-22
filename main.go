@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,27 @@ import (
 )
 
 type H map[string]interface{}
+
+type httpError struct {
+	status int
+	msg    string
+	err    error
+}
+
+func (e *httpError) Error() string {
+	if e.err != nil {
+		return fmt.Sprintf("%s: %v", e.msg, e.err)
+	}
+	return e.msg
+}
+
+func (e *httpError) Unwrap() error {
+	return e.err
+}
+
+func badRequest(msg string, err error) error {
+	return &httpError{status: http.StatusBadRequest, msg: msg, err: err}
+}
 
 func main() {
 	db.Init()
@@ -37,14 +59,28 @@ func main() {
 
 type appHandler func(w http.ResponseWriter, r *http.Request) error
 
+func writeError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(H{"error": msg}); err != nil {
+		slog.Info("encode error response failed", "error", err)
+	}
+}
+
 func (fn appHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := fn(w, r); err != nil {
+		var he *httpError
+		if errors.As(err, &he) {
+			log.Printf("HTTP Error: %v", err)
+			writeError(w, he.status, he.msg)
+			return
+		}
 		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, "Resource not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "Resource not found")
 			return
 		}
 		log.Printf("HTTP Error: %v", err)
-		http.Error(w, "An unexpected error occurred", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "An unexpected error occurred")
 	}
 }
 
@@ -56,10 +92,10 @@ func createOrderHandler(w http.ResponseWriter, req *http.Request) error {
 		IdempotencyKey string `json:"idempotency_key"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
-		return err
+		return badRequest("invalid request body", err)
 	}
 	if payload.Quantity <= 0 || payload.IdempotencyKey == "" || payload.ProductID == 0 {
-		return errors.New("invalid request payload")
+		return badRequest("invalid request payload", nil)
 	}
 
 	var priceCent int64
@@ -80,8 +116,9 @@ func createOrderHandler(w http.ResponseWriter, req *http.Request) error {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
 	return json.NewEncoder(w).Encode(H{
-		"id":              orderID,
+		"id": orderID,
 		// "user_id":         payload.UserID,
 		"user_id":         -1,
 		"product_id":      payload.ProductID,
