@@ -80,7 +80,7 @@ settleup: a minimal order/stock compensation service.
         {
             "id": 1,
             "name": "",
-            "price": 12300 // 123.00 yuan
+            "price_cent": 12300 // 123.00 yuan
         }
     ]
 
