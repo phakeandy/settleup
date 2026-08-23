@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 	"github.com/phakeandy/settleup/internal/db"
 	_ "github.com/phakeandy/tq"
 )
@@ -37,6 +37,18 @@ func badRequest(msg string, err error) error {
 	return &httpError{status: http.StatusBadRequest, msg: msg, err: err}
 }
 
+const (
+	OrderCreated = iota + 1
+	OrderPaid
+	OrderCancelled
+)
+
+const (
+	PaymentPending = iota + 1
+	PaymentSucceeded
+	PaymentCancelled
+)
+
 func main() {
 	db.Init()
 	mux := http.NewServeMux()
@@ -52,9 +64,7 @@ func main() {
 	mux.Handle("POST /api/orders", appHandler(createOrderHandler))
 	mux.Handle("GET /api/products", appHandler(listProductHandler))
 
-	if err := http.ListenAndServe(":8080", mux); err != nil {
-		slog.Error("fail to start", "error", err)
-	}
+	log.Fatal(http.ListenAndServe(":8080", mux))
 }
 
 type appHandler func(w http.ResponseWriter, r *http.Request) error
@@ -86,7 +96,7 @@ func (fn appHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func createOrderHandler(w http.ResponseWriter, req *http.Request) error {
 	var payload struct {
-		// UserID         int    `json:"user_id"`
+		// UserID         int    `json:"user_id"` TODO: sigal user
 		ProductID      int    `json:"product_id"`
 		Quantity       int64  `json:"quantity"`
 		IdempotencyKey string `json:"idempotency_key"`
@@ -103,11 +113,50 @@ func createOrderHandler(w http.ResponseWriter, req *http.Request) error {
 		return err
 	}
 
-	amountCent := priceCent * payload.Quantity
-	res, err := db.DB.Exec(`INSERT INTO orders (user_id, product_id, quantity, amount_cent, status, idempotency_key) VALUES (-1, ?, ?, ?, 1, ?) `,
-		// payload.UserID, TODO: sigle user
-		payload.ProductID, payload.Quantity, amountCent, payload.IdempotencyKey)
+	tx, err := db.DB.Begin()
 	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	amountCent := priceCent * payload.Quantity
+	res, err := tx.Exec(`INSERT INTO orders (user_id, product_id, quantity, amount_cent, status, idempotency_key)
+VALUES (-1, ?, ?, ?, ?, ?)`, payload.ProductID, payload.Quantity, amountCent, OrderCreated, payload.IdempotencyKey)
+
+	if err != nil {
+		var me *mysql.MySQLError
+		if errors.As(err, &me) && me.Number == 1062 {
+			var (
+				orderID        int64
+				userId         int
+				productId      int
+				quantity       int64
+				amountCent     int64
+				status         int
+				idempotencyKey string
+				paymentID      int64
+			)
+			if err := tx.QueryRow(`SELECT id, user_id, product_id, quantity, amount_cent, status, idempotency_key
+FROM orders WHERE idempotency_key = ?`, payload.IdempotencyKey).Scan(&orderID, &userId, &productId, &quantity, &amountCent, &status, &idempotencyKey); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(`SELECT id FROM payments WHERE order_id = ?`, orderID).Scan(&paymentID); err != nil {
+				return err
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			return json.NewEncoder(w).Encode(H{
+				"id":              orderID,
+				"payment_id":      paymentID,
+				"user_id":         userId,
+				"product_id":      productId,
+				"quantity":        quantity,
+				"amount_cent":     amountCent,
+				"status":          status,
+				"idempotency_key": idempotencyKey,
+			})
+		}
 		return err
 	}
 	orderID, err := res.LastInsertId()
@@ -115,16 +164,32 @@ func createOrderHandler(w http.ResponseWriter, req *http.Request) error {
 		return err
 	}
 
+	paymentRes, err := tx.Exec(`INSERT INTO payments (user_id, order_id, amount_cent, status)
+VALUES (-1, ?, ?, ?)`,
+		orderID, amountCent, PaymentPending)
+	if err != nil {
+		return err
+	}
+	paymentID, err := paymentRes.LastInsertId()
+	if err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	return json.NewEncoder(w).Encode(H{
-		"id": orderID,
+		"id":         orderID,
+		"payment_id": paymentID,
 		// "user_id":         payload.UserID,
 		"user_id":         -1,
 		"product_id":      payload.ProductID,
 		"quantity":        payload.Quantity,
 		"amount_cent":     amountCent,
-		"status":          1,
+		"status":          OrderCreated,
 		"idempotency_key": payload.IdempotencyKey,
 	})
 }
@@ -137,7 +202,6 @@ func listProductHandler(w http.ResponseWriter, req *http.Request) error {
 	defer rows.Close()
 
 	var res []interface{}
-	var i int
 	for rows.Next() {
 		var id int
 		var name string
@@ -146,8 +210,8 @@ func listProductHandler(w http.ResponseWriter, req *http.Request) error {
 			return err
 		}
 		res = append(res, H{"id": id, "name": name, "price_cent": price_cent})
-		i++
 	}
+	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(res); err != nil {
 		return err
 	}
