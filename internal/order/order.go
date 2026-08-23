@@ -8,6 +8,8 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/phakeandy/settleup/internal"
 	"github.com/phakeandy/settleup/internal/db"
+
+	"github.com/phakeandy/tq"
 )
 
 const (
@@ -50,6 +52,10 @@ func CreateHandler(w http.ResponseWriter, req *http.Request) error {
 	if payload.Quantity <= 0 || payload.IdempotencyKey == "" || payload.ProductID == 0 {
 		return internal.BadRequest("invalid request payload", nil)
 	}
+
+	// TODO
+	// ctx := req.Context()
+	// tq.Enqueue(ctx, rdb *RDB, tq.NewTask("order.create", paylaod))
 
 	var priceCent int64
 	if err := db.DB.QueryRow(`SELECT price_cent FROM products WHERE id = ?`, payload.ProductID).Scan(&priceCent); err != nil {
@@ -122,4 +128,3 @@ VALUES (-1, ?, ?, ?)`,
 		PaymentID: paymentID,
 	})
 }
-

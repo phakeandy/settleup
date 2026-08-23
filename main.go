@@ -11,7 +11,6 @@ import (
 	"github.com/phakeandy/settleup/internal/order"
 	"github.com/phakeandy/settleup/internal/payment"
 	"github.com/phakeandy/settleup/internal/product"
-	_ "github.com/phakeandy/tq"
 )
 
 func main() {
