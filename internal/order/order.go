@@ -8,8 +8,6 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/phakeandy/settleup/internal"
 	"github.com/phakeandy/settleup/internal/db"
-
-	"github.com/phakeandy/tq"
 )
 
 const (
@@ -96,6 +94,21 @@ FROM orders WHERE idempotency_key = ?`, payload.IdempotencyKey).Scan(&order.ID, 
 	orderID, err := res.LastInsertId()
 	if err != nil {
 		return err
+	}
+
+	// 扣库存:与订单、支付同一事务,失败整体回滚。
+	// 必须在 1062 replay 分支之后:重试请求只回放旧订单,不重复扣库存。
+	stockRes, err := tx.Exec(`UPDATE inventories SET available = available - ? WHERE product_id = ? AND available >= ?`,
+		payload.Quantity, payload.ProductID, payload.Quantity)
+	if err != nil {
+		return err
+	}
+	affected, err := stockRes.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return internal.BadRequest("insufficient stock", nil)
 	}
 
 	paymentRes, err := tx.Exec(`INSERT INTO payments (user_id, order_id, amount_cent, status)

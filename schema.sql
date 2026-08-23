@@ -19,10 +19,21 @@ CREATE TABLE orders (
 );
 
 CREATE TABLE payments (
-    id               INT           AUTO_INCREMENT PRIMARY KEY,
-    order_id         INT           NOT NULL,
-    user_id          INT           NOT NULL,
-    amount_cent      BIGINT        NOT NULL,
-    status           INT           NOT NULL,  -- 1->pending / 2->succeeded / 3->cancelled
-    created_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+    id           INT        AUTO_INCREMENT PRIMARY KEY,
+    order_id     INT        NOT NULL,
+    user_id      INT        NOT NULL,
+    amount_cent  BIGINT     NOT NULL,
+    status       INT        NOT NULL,  -- 1->pending / 2->succeeded / 3->cancelled
+    created_at   TIMESTAMP  DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE inventories (
+    id          INT          AUTO_INCREMENT PRIMARY KEY,
+    product_id  INT          NOT NULL UNIQUE,
+    total       BIGINT       NOT NULL,
+    available   BIGINT       NOT NULL,
+    created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT chk_available_ge_0   CHECK (available >= 0),
+    CONSTRAINT chk_available_le_tot CHECK (available <= total)
 );
