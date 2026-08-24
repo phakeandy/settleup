@@ -43,7 +43,7 @@ func main() {
 			slog.Info("encode metrics failed", "error", err)
 		}
 	})
-	mux.Handle("POST /api/orders", internal.AppHandler(order.CreateHandler))
+	mux.Handle("POST /api/orders", order.CreateHandler(db.DB, db.RDB))
 	mux.Handle("GET /api/products", internal.AppHandler(product.ListHandler))
 	mux.Handle("POST /api/payments", internal.AppHandler(payment.CreateHandler))
 

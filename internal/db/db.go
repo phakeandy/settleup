@@ -13,6 +13,11 @@ import (
 var DB *sql.DB
 
 func Init() {
+	initMySQL()
+	initRedis()
+}
+
+func initMySQL(){
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true",
 		os.Getenv("DB_USER"),
 		os.Getenv("DB_PASSWORD"),

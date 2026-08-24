@@ -56,3 +56,7 @@ func (e *HttpError) Unwrap() error {
 func BadRequest(msg string, err error) error {
 	return &HttpError{status: http.StatusBadRequest, msg: msg, err: err}
 }
+
+func Conflict(msg string, err error) error {
+	return &HttpError{status: http.StatusConflict, msg: msg, err: err}
+}
