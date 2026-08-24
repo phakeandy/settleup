@@ -202,3 +202,70 @@ InnoDB 锁队列里的那一段——排在连接池外面、还没轮到拿一�
 结构性结论没有变:同一时刻只有一个事务能碰这一行,超卖没有发生,吞吐撞顶。变化的是
 排队具体堆在哪一层——不是 InnoDB 的锁队列,更可能是 Go 的连接池——这个细节值得
 在下一步验证清楚,再决定 Redis 方案到底绕开的是哪一层瓶颈。
+
+## Round 4, 2026-08-24:证实 Round 3 的猜测,排队确实堆在连接池
+
+修复/改动:[cmd/server/main.go](../cmd/server/main.go) 的 `/metrics` 从占位的
+`todo` 换成了输出 `db.Stats()`,重点是 `WaitCount`(等一个池内连接的次数)和
+`WaitDuration`(总共等了多久)——这两个字段完全是 `database/sql` 自带的,不用自己
+埋点。重新 `make build`、重启了服务进程。
+
+服务重启后先确认过一次 `/metrics`,`db_wait_count` 是 0,说明接下来的增量就是这次
+测试产生的,不需要再做前后差值。
+
+k6 输出:
+
+    checks_total.......: 4814    526.889716/s
+    checks_succeeded...: 100.00% 4814 out of 4814
+
+    CUSTOM
+    orders_created.................: 1000   109.449463/s
+    orders_out_of_stock............: 3814   417.440253/s
+
+    HTTP
+    http_req_duration..............: avg=6.68s min=101.46ms med=7.4s max=9.02s p(90)=8.42s p(95)=8.61s
+    dropped_iterations.............: 5188   567.823815/s
+    vus............................: 1787   min=1787         max=4400
+    vus_max........................: 4484   min=3000         max=4484
+
+`/metrics` 输出(压测跑完后取的,服务是刚重启的,增量即总量):
+
+    db_max_open_connections: 80
+    db_open_connections: 80
+    db_wait_count: 9518
+    db_wait_duration_ms: 31443608
+
+    平均每次等连接池名额 ≈ 31443608 / 9518 ≈ 3304.6 ms
+
+同一时段 InnoDB 锁等待的差值(和 Round 3 的 138.6ms 交叉验证):
+
+    Innodb_row_lock_waits: 12469 → 17282  (+4813)
+    Innodb_row_lock_time:  3019506 → 3703888 ms  (+684382 ms)
+    平均等锁时长 ≈ 684382 / 4813 ≈ 142.2 ms
+
+MySQL 验证,超卖检查第四轮依然干净:
+
+    orders_created: 1000
+    inventories.available: 0
+
+Round 3 的猜测被证实了:等连接池名额(3304.6ms/次)比等 InnoDB 锁(142.2ms/次)
+高了一个量级以上,排队确实主要堆在 Go 的连接池,不在 MySQL 内部。
+
+`db_wait_count`(9518)约等于这轮完成请求数(4814)的两倍,对得上
+[order.go](../internal/order/order.go) 里每个请求要向连接池要两次连接的事实:
+一次是事务外查 `price_cent` 的 `db.DB.QueryRow`,一次是 `db.DB.Begin()` 开的那个
+事务本身。把两次等待叠起来:
+
+    2 × 3304.6ms ≈ 6.61s
+    + 142.2ms(等 InnoDB 锁)
+    + 14.6ms(Round 3 测的无竞争执行基线)
+    ≈ 6.77s
+
+跟这轮 k6 实测的 `avg=6.68s` 基本吻合。三个独立数据源(k6 的端到端延迟、
+`db.Stats()`、`Innodb_row_lock%`)拼出了同一个数,链条闭环。
+
+结论:结构性根因还是同一行的排他锁横跨整个事务、同一时刻只能有一个事务碰它,这个
+没有变;但物理上"排队"这件事绝大部分发生在应用进程里等一个连接池名额,不是发生在
+MySQL 内部等锁——这是 Round 2 最初的说法里说错的地方,现在有直接测量数据订正了。
+下一步:Redis + Lua 原子扣减,绕开的应该正是这整条"抢连接 → 抢锁 → 提交"的链路,
+再跑一轮做 before/after 对比,应该能看到这两个等待数字(尤其是连接池等待)大幅下降。
