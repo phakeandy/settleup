@@ -269,3 +269,65 @@ Round 3 的猜测被证实了:等连接池名额(3304.6ms/次)比等 InnoDB 锁(
 MySQL 内部等锁——这是 Round 2 最初的说法里说错的地方,现在有直接测量数据订正了。
 下一步:Redis + Lua 原子扣减,绕开的应该正是这整条"抢连接 → 抢锁 → 提交"的链路,
 再跑一轮做 before/after 对比,应该能看到这两个等待数字(尤其是连接池等待)大幅下降。
+
+## Round 5, 2026-08-25:Redis 原子扣减上线,行锁等待归零,吞吐打到目标速率
+
+改动:[internal/order/order.go](../internal/order/order.go) 把库存检查+扣减从
+MySQL 的 `UPDATE inventories` 挪到 Redis 的 `grantOnceScript`(一条 Lua 脚本,原子
+完成"查 `granted_key` 去重 → 查库存 → 扣减 → 记 `granted_key`,TTL 300s"),而且这一步
+提到了整个 handler 最前面,库存不够的请求在打 MySQL 之前就被拒绝。`inventories` 表
+不再被这条路径写入。
+
+第一版实现审查时发现三个问题,已修复:Redis 检查曾经写在 MySQL `INSERT INTO orders`
+之后,等于白白让所有请求都在 MySQL 里插了一行再回滚,完全抵消了这次改动的意义;
+`ALREADY_GRANTED` 分支原来什么都没做,直接把 Redis 的原始 error 透传成 500,现在会
+去 MySQL 查真实订单,查不到(还在补偿窗口里)返回 409;还有一处 `err.Err()` 的编译
+错误,应为 `err.Error()`。
+
+k6 输出:
+
+    checks_total.......: 10001   3330.393554/s
+    checks_succeeded...: 100.00% 10001 out of 10001
+
+    CUSTOM
+    orders_created.................: 1000   333.006055/s
+    orders_out_of_stock............: 9001   2997.387499/s
+
+    HTTP
+    http_req_duration..............: avg=68.81ms  min=103.09µs med=268.81µs max=1s p(90)=158.99ms p(95)=637.04ms
+    http_req_failed................: 90.00% 9001 out of 10001
+    http_reqs......................: 10001  3330.393554/s
+
+    EXECUTION
+    vus............................: 2       min=1             max=933
+    vus_max........................: 3000    min=3000          max=3000
+
+没有出现 `dropped_iterations`——10000 个请求全部按目标速率 3333.33/s 打完,一个都没
+丢,`vus` 最高只到 933(远没顶到 3000 的上限)。跟 Round 4 比:
+
+    实际吞吐: 527/s → 3330/s(基本等于目标速率)
+    avg 延迟: 6.68s → 68.8ms
+    p90 延迟: 8.42s → 159ms
+
+`Innodb_row_lock%` 压测前后完全没变(waits 17282 → 17282,time 3703888 → 3703888):
+这条路径已经彻底不再产生任何行锁等待,因为 `orders` 表的插入是各自独立的自增行,
+互不竞争。`/metrics` 里 `db_wait_count` 从 0 涨到 1851,平均约 234ms/次
+(432928/1851)——连接池还有一点排队,但比 Round 4 的 3.3s/次小了一个数量级:1000
+个真正成功的请求要抢 80 个连接,但不再被同一把锁强制串行,能真正并行处理。
+
+MySQL 验证:
+
+    orders_created: 1000
+    inventories.available: 1000   <- 没有变化,见下面的说明
+    Redis settleup:inventory:{1}: 0
+    Redis DBSIZE: 1001            <- 1 个库存 key + 1000 个 granted key,跟卖出数对上
+
+超卖检查依然干净,五轮下来都是 0。`inventories.available` 停在 1000 不是 bug,是
+这次改动的直接后果:新流程完全不再写这张表,库存的权威来源已经变成 Redis。这张表
+以后要不要跟着同步更新、还是只靠对账去刷新,这个开放问题现在从理论变成了眼前能看见
+的现象,需要拍板了。
+
+结论:Redis 原子扣减把秒杀这条路径的行锁竞争完全消除了,吞吐从原来卡在 ~500/s
+提升到基本达到目标速率(~3330/s),延迟从秒级降到几十到几百毫秒。剩下没做的:
+Redis 扣减成功但 MySQL 写入失败时的补偿任务(`tq.Enqueue`,todo.txt 里第 6 步)
+还没接,现在这种失败会让库存在 Redis 里永久少一份,没有人补上。
