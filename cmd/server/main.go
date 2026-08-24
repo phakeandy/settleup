@@ -1,3 +1,6 @@
+// TODO: understand the relationship between row-level lock and index.  See
+// round 4.
+
 package main
 
 import (
