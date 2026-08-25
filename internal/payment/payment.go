@@ -4,21 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/phakeandy/settleup/internal"
 	"github.com/phakeandy/settleup/internal/db"
-	"github.com/phakeandy/settleup/internal/order"
 )
-
-type Payment struct {
-	ID         int64     `json:"id"`
-	OrderID    int64     `json:"order_id"`
-	UserID     int       `json:"user_id"`
-	AmountCent int64     `json:"amount_cent"`
-	Status     int       `json:"status"`
-	CreatedAt  time.Time `json:"created_at"`
-}
 
 // CreateHandler 执行支付：在一个事务里原子翻转两个状态机——
 // payment: pending -> succeeded 且 order: created -> paid，要么全成要么全不成。
@@ -44,7 +33,7 @@ func CreateHandler(w http.ResponseWriter, req *http.Request) error {
 
 	// 条件更新：只有 pending 的支付才能被翻转为 succeeded。
 	res, err := tx.Exec(`UPDATE payments SET status = ? WHERE id = ? AND status = ?`,
-		order.PaymentSucceeded, payload.PaymentID, order.PaymentPending)
+		internal.PaymentSucceeded, payload.PaymentID, internal.PaymentPending)
 	if err != nil {
 		return err
 	}
@@ -60,7 +49,7 @@ func CreateHandler(w http.ResponseWriter, req *http.Request) error {
 FROM payments WHERE id = ?`, payload.PaymentID).Scan(&p.ID, &p.OrderID, &p.UserID, &p.AmountCent, &p.Status, &p.CreatedAt); err != nil {
 			return err // sql.ErrNoRows -> 404
 		}
-		if p.Status == order.PaymentSucceeded {
+		if p.Status == internal.PaymentSucceeded {
 			// 幂等重放：已付过，直接返回成功。
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -76,7 +65,7 @@ FROM payments WHERE id = ?`, payload.PaymentID).Scan(&p.ID, &p.OrderID, &p.UserI
 	}
 
 	res, err = tx.Exec(`UPDATE orders SET status = ?, paid_at = NOW() WHERE id = ? AND status = ?`,
-		order.StatusPaid, p.OrderID, order.StatusCreated)
+		internal.StatusPaid, p.OrderID, internal.StatusCreated)
 	if err != nil {
 		return err
 	}
